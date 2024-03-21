@@ -1,0 +1,193 @@
+#!/usr/bin/python3
+
+"""Extract files from a DIPS AIP tar or DIP zip"""
+
+from abc import ABC, abstractmethod
+import argparse
+from dataclasses import dataclass
+from enum import Enum
+import os
+from pathlib import Path
+import shutil
+import sys
+import tarfile
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+
+RenameMethod = Enum("RenameMethod", "NAME IID OID")
+
+ns = {"": "http://dips.bundesarchiv.de/schema"}
+
+
+@dataclass
+class File:
+    """Metadata about a file contained in an AIP or DIP."""
+    name: str
+    ext: str
+    loc: str
+    iid: str
+    oid: str
+
+
+class Container(ABC):
+    """Interface for AIP (tar) and DIP (zip) containers."""
+    @abstractmethod
+    def __init__(self, path: Path) -> None:
+        pass
+
+    @abstractmethod
+    def metaxml(self) -> ET.Element:
+        """Retrieve the AIP/DIP metadata XML."""
+
+    @abstractmethod
+    def nameof(self, file: File) -> str:
+        """Get the name of a file in the container."""
+
+    @abstractmethod
+    def extract(self, file: File, dest: Path) -> None:
+        """Extract a file from the container."""
+
+
+class TarContainer(Container):
+    """A tar file representing an AIP."""
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def metaxml(self) -> ET.Element:
+        with tarfile.open(self.path) as t:
+            return ET.fromstring(t.extractfile("DIPSARCH.xml").read())
+
+    def nameof(self, file: File) -> str:
+        return file.oid + file.ext
+
+    def extract(self, file: File, dest: Path) -> None:
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(self.path) as t:
+            t.extract(self.nameof(file), path=dest)
+
+
+class ZipContainer(Container):
+    """A zip file representing a DIP."""
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def metaxml(self) -> ET.Element:
+        with zipfile.ZipFile(self.path) as z:
+            return ET.fromstring(z.open("AIPXML.xml").read())
+
+    def nameof(self, file: File) -> str:
+        return os.path.join("content", file.iid + file.ext)
+
+    def extract(self, file: File, dest: Path) -> None:
+        dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(self.path) as z:
+            z.extract(self.nameof(file), path=dest)
+
+
+def mk_container(path: Path) -> Container:
+    """Smart constructor for tar/zip container objects."""
+    if tarfile.is_tarfile(path):
+        return TarContainer(path)
+    if zipfile.is_zipfile(path):
+        return ZipContainer(path)
+    sys.exit("Neither tar nor zip file: " + str(path))
+
+
+def mk_files(xml: ET.Element) -> list[File]:
+    """Make file objects from AIP XML."""
+    files: list[File] = []
+    names: dict[str, tuple[str, str]] = {}  # object ID → (name, ext)
+    for o in xml.findall("technical/object", ns):
+        oid = o.find("objectIdentifier/objectIdentifierValue", ns).text
+        # initialName = "foo.docx"
+        # originalName = "<Object ID>.pdf"
+        # → "foo.pdf"
+        iname = o.find("objectCharacteristics/initialName", ns).text
+        oname = o.find("objectCharacteristics/originalName", ns).text
+        names[oid] = (os.path.splitext(iname)[0], os.path.splitext(oname)[1])
+    for i in xml.findall("intellectualEntity/item", ns):
+        iid = i.find("IID", ns).text
+        oid = i.find(
+            "linkingObjectIdentifier/linkingObjectIdentifierValue", ns).text
+        name = names[oid][0]
+        ext = names[oid][1]
+        loc = i.find("location", ns).text
+        files.append(File(name, ext, loc, iid, oid))
+    return files
+
+
+class AIP:
+    """An AIP. Essentially, its IEID, AIPID and the files it contains."""
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.container: Container = mk_container(self.path)
+        xml = self.container.metaxml()
+        self.ieid: str = xml.find("intellectualEntity/IEID", ns).text
+        self.aipid: str = xml.find("AIP/AIPID", ns).text
+        self.files: list[File] = mk_files(xml)
+
+    def __str__(self):
+        lines = [
+            "File:  " + str(self.path),
+            "IEID:  " + self.ieid,
+            "AIPID: " + self.aipid,
+            ""
+        ]
+        for f in self.files:
+            lines += [
+                "  File:     " + f.name + f.ext,
+                "  Location: " + f.loc,
+                "  IID:      " + f.iid,
+                "  OID:      " + f.oid,
+                ""
+            ]
+        return "\n".join(lines)
+
+    def extract(self, dest: Path, rename: RenameMethod) -> None:
+        """Extract all files from the AIP, renaming them as specified."""
+        if not dest:
+            dest = Path.cwd() / self.ieid / self.aipid
+        with tempfile.TemporaryDirectory() as d:
+            tmp_dir = Path(d)
+            for f in self.files:
+                self.container.extract(f, tmp_dir)
+                old = tmp_dir / self.container.nameof(f)
+                if rename == RenameMethod.NAME:
+                    new = dest / f.loc / (f.name + f.ext)
+                if rename == RenameMethod.IID:
+                    new = dest / (f.iid + f.ext)
+                if rename == RenameMethod.OID:
+                    new = dest / (f.oid + f.ext)
+                new.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(old, new)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Extract files from a DIPS AIP/DIP")
+    parser.add_argument("files", nargs="*", type=Path,
+                        help="AIP/DIP files (tar/zip)")
+    parser.add_argument("-l", "--list", action="store_true",
+                        help="don't extract, only list AIP content")
+    parser.add_argument("-d", "--dest", type=Path, default=None,
+                        help="destination directory (default ./IEID/AIPID/)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-n", "--name", dest="rename",
+                       action="store_const", const=RenameMethod.NAME,
+                       help="rename files by original file name and " +
+                            "location (default)")
+    group.add_argument("-i", "--iid", dest="rename",
+                       action="store_const", const=RenameMethod.IID,
+                       help="rename files by Item ID instead of file name")
+    group.add_argument("-o", "--oid", dest="rename",
+                       action="store_const", const=RenameMethod.OID,
+                       help="rename files by Object ID instead of file name")
+    parser.set_defaults(rename=RenameMethod.NAME)
+    args = parser.parse_args()
+    for f in args.files:
+        aip = AIP(f)
+        if args.list:
+            print(aip)
+        else:
+            aip.extract(args.dest, args.rename)
