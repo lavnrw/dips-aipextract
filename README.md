@@ -53,8 +53,8 @@ AIPID: 89e08399-314b-4c98-8aea-a1bc1cc18c7f
   OID:      26c8c714-b821-4303-8e47-2751df45359e
 ~~~
 
-Note that nothing was extracted yet. Go ahead and extract the AIP, by default
-restoring the original file names:
+Note that nothing has been extracted yet. Go ahead and extract the AIP, by
+default restoring the original file names:
 
 ~~~console
 $ aipextract aip.tar
@@ -70,7 +70,7 @@ f84ca968-bd32-4587-9411-77b6c527d533      # IEID
       │  ├── 01.jpg
       │  └── 02.jpg
       └── b
-          └── 03.jpg
+         └── 03.jpg
 ~~~
 
 Additional options are available:
