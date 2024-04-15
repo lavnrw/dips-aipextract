@@ -99,22 +99,37 @@ def mk_files(xml: ET.Element) -> list[File]:
     files: list[File] = []
     names: dict[str, tuple[str, str]] = {}  # object ID → (name, ext)
     for o in xml.findall("technical/object", ns):
-        oid = o.find("objectIdentifier/objectIdentifierValue", ns).text
-        # initialName = "foo.docx"
+        oid = findtext_or_die(o, "objectIdentifier/objectIdentifierValue")
+        # initialName = "foo.docx" (optional in schema!)
         # originalName = "<Object ID>.pdf"
         # → "foo.pdf"
-        iname = o.find("objectCharacteristics/initialName", ns).text
-        oname = o.find("objectCharacteristics/originalName", ns).text
+        oname = findtext_or_die(o, "objectCharacteristics/originalName")
+        iname = findtext_or_die(o, "objectCharacteristics/initialName", oname)
         names[oid] = (os.path.splitext(iname)[0], os.path.splitext(oname)[1])
     for i in xml.findall("intellectualEntity/item", ns):
-        iid = i.find("IID", ns).text
-        oid = i.find(
-            "linkingObjectIdentifier/linkingObjectIdentifierValue", ns).text
+        iid = findtext_or_die(i, "IID")
+        oid = findtext_or_die(
+            i, "linkingObjectIdentifier/linkingObjectIdentifierValue")
         name = names[oid][0]
         ext = names[oid][1]
-        loc = i.find("location", ns).text
+        loc = findtext_or_die(i, "location", "")
         files.append(File(name, ext, loc, iid, oid))
     return files
+
+
+def findtext_or_die(elem: ET.Element, match: str, default=None) -> str:
+    """Like ElementTree.findtext, but more morbid.
+
+    Unlike the findtext method this will exit with an error instead of
+    returning None if no element is found and no default value is provided.
+    This avoids unexpected exceptions on required but missing elements.
+    Further more, the namespace context of this function is fixed for
+    convenience.
+    """
+    t = elem.findtext(match, default=default, namespaces=ns)
+    if t:
+        return t
+    sys.exit("Required element " + match + " not found in metadata XML")
 
 
 class AIP:
@@ -123,8 +138,8 @@ class AIP:
         self.path = path
         self.container: Container = mk_container(self.path)
         xml = self.container.metaxml()
-        self.ieid: str = xml.find("intellectualEntity/IEID", ns).text
-        self.aipid: str = xml.find("AIP/AIPID", ns).text
+        self.ieid: str = findtext_or_die(xml, "intellectualEntity/IEID")
+        self.aipid: str = findtext_or_die(xml, "AIP/AIPID")
         self.files: list[File] = mk_files(xml)
 
     def __str__(self):
